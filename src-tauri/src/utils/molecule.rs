@@ -1,11 +1,13 @@
 pub mod molecule {
     use lazy_static::lazy_static;
+    use rayon::iter::MaxLen;
     use crate::utils::file_processor;
     use std::collections::HashMap;
     use file_processor::file_reader::*;
     use serde::{Deserialize, Serialize};
     use tklog::{debug, error, fatal, info, trace, warn, LEVEL, LOG};
     use serde_json::Value;
+    use std::f64::consts::PI;
 
     lazy_static! {
         pub static ref PERIODIC_TABLE: Value = serde_json::from_str(include_str!("../periodic_table/PeriodicTableJSON.json")).unwrap();
@@ -153,6 +155,40 @@ pub mod molecule {
         }
     }
 
+    fn calc_direction_unit_vector(a: [f64; 3], b: [f64; 3]) -> (f64, f64, f64) {
+        let dx = b[0] - a[0];
+        let dy = b[1] - a[1];
+        let dz = b[2] - a[2];
+        let r = (dx.powi(2) + dy.powi(2) + dz.powi(2)).sqrt();
+
+        let dx1 = dx / r;
+        let dy1 = dy / r;
+        let dz1 = dz / r;
+
+        let rotation_z = dz1;
+        let rotation_x = dx1;
+        let rotation_y = dy1;
+
+        // let pitch = (dy1.atan() * 180.0);
+        // let roll = if dx1.abs() > 0.998 || dz1.abs() > 0.998 {
+        //     (-dx1).atan2(dz1)
+        // } else {
+        //     dx1.atan2(dz1)
+        // };
+
+        // let yaw = if(dx1 * dx1 + dz1 * dz1) > 0.001 {
+        //     dx1.atan2(dy1)
+        // } else {
+        //     0.0
+        // };
+
+        // let pitch = pitch * 180.0) / std::f64::consts::PI;
+        // let roll = (roll * 180.0) / std::f64::consts::PI;
+        // let yaw = (yaw * 180.0) / std::f64::consts::PI;
+
+        (rotation_x, rotation_y, rotation_z)
+    }
+
     #[derive(Serialize, Deserialize)]
     pub struct Molecule {
         name: String,
@@ -281,7 +317,7 @@ pub mod molecule {
             cov_matrix
         }
 
-        fn get_distance_matrix(&self) -> Vec<Vec<f64>> {
+        pub fn get_distance_matrix(&self) -> Vec<Vec<f64>> {
             let mut distance_matrix =
                 vec![vec![0.0; self.coordinates.len()]; self.coordinates.len()];
             for i in 0..self.coordinates.len() {
@@ -301,12 +337,18 @@ pub mod molecule {
             let mut vdw_matrix = vec![vec![false; self.coordinates.len()]; self.coordinates.len()];
             let distance_matrix = self.get_distance_matrix();
             let vdw_threshold_matrix = self.get_vdw_threshold_matrix();
+            let cov_threshold_matrix = self.get_cov_threshold_matrix();
+
+            let atoms = self.get_atoms();
+
             for i in 0..self.coordinates.len() {
                 for j in 0..self.coordinates.len() {
                     if i == j {
                         vdw_matrix[i][j] = false
-                    } else {
-                        vdw_matrix[i][j] = distance_matrix[i][j] < vdw_threshold_matrix[i][j];
+                    } else if distance_matrix[i][j] < vdw_threshold_matrix[i][j] * 0.7 && distance_matrix[i][j] > cov_threshold_matrix[i][j] * 1.1 {
+                        if atoms[i] == 1 && atoms[j] != 6 { // Hydrogen bond
+                            vdw_matrix[i][j] = true
+                        } 
                     }
                 }
             }
@@ -322,15 +364,15 @@ pub mod molecule {
                     if i == j {
                         cov_matrix[i][j] = false
                     } else {
-                        cov_matrix[i][j] = distance_matrix[i][j] < cov_threshold_matrix[i][j];
+                        cov_matrix[i][j] = distance_matrix[i][j] < cov_threshold_matrix[i][j] * 1.1;
                     }
                 }
             }
             cov_matrix
         }
 
-        pub fn calc_bond_positions(&self) -> Vec<Vec<[f64; 4]>> {
-            let mut bond_positions: Vec<Vec<[f64; 4]>> = vec![vec![[0.0; 4]; self.coordinates.len()]; self.coordinates.len()];
+        pub fn calc_bond_positions(&self) -> Vec<Vec<[f64; 7]>> {
+            let mut bond_positions: Vec<Vec<[f64; 7]>> = vec![vec![[0.0; 7]; self.coordinates.len()]; self.coordinates.len()];
             let vdw_matrix = self.get_vdw_matrix();
             let cov_matrix = self.get_cov_matrix();
             for i in 0..self.coordinates.len() {
@@ -340,11 +382,15 @@ pub mod molecule {
                         bond_positions[i][j][1] = (self.coordinates[i][1] + self.coordinates[j][1]) / 2.0;
                         bond_positions[i][j][2] = (self.coordinates[i][2] + self.coordinates[j][2]) / 2.0;
                         bond_positions[i][j][3] = 1.0;
+
+                        (bond_positions[i][j][4], bond_positions[i][j][5], bond_positions[i][j][6]) = calc_direction_unit_vector(self.coordinates[i], self.coordinates[j]);// For bond orientation
                     } else if vdw_matrix[i][j] {
                         bond_positions[i][j][0] = (self.coordinates[i][0] + self.coordinates[j][0]) / 2.0;
                         bond_positions[i][j][1] = (self.coordinates[i][1] + self.coordinates[j][1]) / 2.0;
                         bond_positions[i][j][2] = (self.coordinates[i][2] + self.coordinates[j][2]) / 2.0;
                         bond_positions[i][j][3] = 0.5;
+
+                        (bond_positions[i][j][4], bond_positions[i][j][5], bond_positions[i][j][6]) = calc_direction_unit_vector(self.coordinates[i], self.coordinates[j]);// For bond orientation
                     }
                 }
             }
@@ -476,14 +522,29 @@ pub mod molecule {
         };
     }
 
-    pub fn mol_from_orca_output(filename: &str) -> Molecule {
-        let geoms: Vec<(Vec<usize>, Vec<[f64; 3]>)> = file_reader::read_orca_output(filename);
-        let mol: (Vec<usize>, Vec<[f64; 3]>) = geoms[0].clone();
-        return Molecule {
+    pub fn mol_from_orca_output(filename: &str) -> (Molecule, Vec<(String, f64)>) {
+        let (geoms, calculated_infos) = file_reader::read_orca_output(filename);
+        let len = geoms.len();
+        let mol: (Vec<usize>, Vec<[f64; 3]>) = geoms[len - 1].clone();
+        let calculated_info = calculated_infos[len - 1].clone();
+        return (Molecule {
             name: filename.to_string(),
             atoms: mol.0,
             coordinates: mol.1,
-        };
+        }, calculated_info);
+    }
+
+    pub fn mol_from_gaussian_output(filename: &str) -> (Molecule, Vec<(String, f64)>) {
+        let (geoms, calculated_infos) = file_reader::read_gaussian_output(filename);
+        let len = geoms.len();
+        let mol: (Vec<usize>, Vec<[f64; 3]>) = geoms[len - 1].clone();
+        let len_info = calculated_infos.len();
+        let calculated_info = calculated_infos[len_info - 1].clone();
+        return (Molecule {
+            name: filename.to_string(),
+            atoms: mol.0,
+            coordinates: mol.1,
+        }, calculated_info)
     }
 
     pub fn mol_from_orca_output_str(content: &str) -> Molecule {
@@ -496,14 +557,14 @@ pub mod molecule {
         };
     }
 
-    pub fn mols_from_orca_trajectory(filename: &str) -> Vec<Molecule> {
-        let geoms: Vec<(Vec<usize>, Vec<[f64; 3]>)> = file_reader::read_orca_output(filename);
+    pub fn mols_from_orca_trajectory(filename: &str) -> (Vec<Molecule>, Vec<Vec<(String, f64)>>) {
+        let (geoms, calculated_infos) = file_reader::read_orca_output(filename);
         let mols: Vec<Molecule> = geoms
             .into_iter()
             .map(|geom| geom_to_mol(geom.clone()))
             .collect();
 
-        mols
+        (mols, calculated_infos)
     }
 
     pub fn mols_from_orca_trajectory_str(content: &str) -> Vec<Molecule> {

@@ -5,6 +5,7 @@ pub mod file_reader {
     use std::fs::File;
     use std::io::{BufRead, BufReader};
     use tklog::{debug, error, fatal, info, trace, warn, LEVEL, LOG};
+    use rayon::prelude::*;
 
     lazy_static! {
         pub static ref ELEMENTS: HashMap<&'static str, f64> = [
@@ -306,8 +307,71 @@ pub mod file_reader {
         (atoms, coordinates)
     }
 
-    pub fn read_orca_output(filename: &str) -> Vec<(Vec<usize>, Vec<[f64; 3]>)> {
-        tklog::LOG.set_level(LEVEL::Info);
+    pub fn read_gaussian_output(filename: &str) -> (Vec<(Vec<usize>, Vec<[f64; 3]>)>, Vec<Vec<(String, f64)>>) {
+        tklog::LOG.set_level(LEVEL::Debug);
+        let file = File::open(filename).unwrap();
+        let reader = BufReader::new(file);
+
+        let mut lines: Vec<String> = reader.lines().map(|l| l.unwrap()).collect();
+        let mut gau_version = String::new();
+
+        let mut no_atoms:u32 = 0;
+
+        let mut coords_idxs: Vec<(usize, usize)> = Vec::new();
+        let mut block_idx: (usize, usize) = (0, 0);
+
+        let mut calculated_info:Vec<Vec<(String, f64)>> = Vec::new();
+        let mut calculated_info_item:Vec<(String, f64)> = Vec::new();
+
+        for (i, line) in lines.iter().enumerate() {
+            if line.contains("Entering Gaussian System") {
+                gau_version = line.split("=").last().unwrap_or("g16").trim().to_string();
+                info!(format!("Gaussian version: {}", gau_version));
+            } else if line.contains("Input orientation:") {
+                info!(format!("Found coord start at line {}", i + 5));
+                block_idx.0 = i + 5;
+            } else if line.contains("Distance matrix (angstroms):") {
+                info!(format!("Found coord end at line {}", i - 1));
+                block_idx.1 = i - 1;
+                coords_idxs.push(block_idx);
+            } else if line.contains("SCF Done:  E") {
+                calculated_info_item.push(
+                    ("SCF Energy".to_string(), 
+                    line.split("=").last().unwrap_or("0.0   A.U.")
+                        .split_whitespace().collect::<Vec<&str>>()[0].parse::<f64>().unwrap_or(0.0))
+                );
+                calculated_info.push(calculated_info_item.clone());
+                calculated_info_item = Vec::new();
+            }
+        }
+
+        let mut geoms: Vec<(Vec<usize>, Vec<[f64; 3]>)> = Vec::new();
+
+        for coords_idx in coords_idxs {
+            let mut atoms: Vec<usize> = Vec::new();
+            let mut coordinates: Vec<[f64; 3]> = Vec::new();
+
+            let coords_block = lines[coords_idx.0..coords_idx.1].to_vec();
+            for coord in coords_block {
+                let items = coord
+                    .split_whitespace()
+                    .collect::<Vec<&str>>()
+                    .into_iter()
+                    .filter(|x| !x.is_empty())
+                    .map(|s| element_atomic_parser(s))
+                    .collect::<Vec<f64>>();
+                atoms.push(items[1] as usize);
+                coordinates.push([items[3], items[4], items[5]]);
+            }
+
+            geoms.push((atoms, coordinates))           
+        }
+
+        (geoms, calculated_info)
+    }
+
+    pub fn read_orca_output(filename: &str) -> (Vec<(Vec<usize>, Vec<[f64; 3]>)>, Vec<Vec<(String, f64)>>) {
+        tklog::LOG.set_level(LEVEL::Debug);
 
         let file = File::open(filename).unwrap();
         let reader = BufReader::new(file);
@@ -320,6 +384,8 @@ pub mod file_reader {
         let mut orca_version = "".to_string();
 
         let mut no_atoms: u32 = 0;
+        let mut calculated_info:Vec<Vec<(String, f64)>> = Vec::new();
+        let mut calculated_info_item:Vec<(String, f64)> = Vec::new();
 
         let mut coords_idxs: Vec<(usize, usize)> = Vec::new();
         let mut block_idx: (usize, usize) = (0, 0);
@@ -328,15 +394,29 @@ pub mod file_reader {
             if line.contains("Program Version ") {
                 orca_version = version_indicator.find(line).unwrap().as_str().to_string();
                 info!(format!("ORCA version: {}", orca_version));
-            } else if line.contains("CARTESIAN COORDINATES (ANGSTROEM)") {
+            } 
+            // else if line.contains("GEOMETRY OPTIMIZATION CYCLE") {
+            //     debug!(format!("Intialize new cycle at line {}", i));
+            //     calculated_info_item = Vec::new();} 
+            else if line.contains("CARTESIAN COORDINATES (ANGSTROEM)") {
                 debug!(format!("Found coord start at line {}", i + 2));
                 block_idx.0 = i + 2;
             } else if line.contains("CARTESIAN COORDINATES (A.U.)") {
-                debug!(format!("Found coord end at line {}", i - 3));
-                block_idx.1 = i - 3;
+                debug!(format!("Found coord end at line {}", i - 2));
+                block_idx.1 = i - 2;
                 debug!(format!("Push the block: {:?}", block_idx));
                 coords_idxs.push(block_idx);
-            }
+            } else if line.contains("Dispersion correction") && !line.contains("sec)") {
+                let dispersion = line.split_whitespace().last().unwrap_or("0.0000");
+                debug!(format!("Found dispersion correction at line {} with value {}", i, dispersion));
+                let dispersion_f = dispersion.parse::<f64>().unwrap_or(0.0);
+                calculated_info_item.push(("Dispersion Correction".to_string(), dispersion_f));
+            } else if line.contains("FINAL SINGLE POINT ENERGY") {
+                let energy = line.split_whitespace().last().unwrap_or("0.0000").parse::<f64>().unwrap();
+                calculated_info_item.push(("Single Point Energy".to_string(), energy));
+                calculated_info.push(calculated_info_item.clone());
+                calculated_info_item = Vec::new();
+            } 
         }
 
         let mut geoms: Vec<(Vec<usize>, Vec<[f64; 3]>)> = Vec::new();
@@ -361,7 +441,7 @@ pub mod file_reader {
             geoms.push((atoms, coordinates))
         }
 
-        geoms
+        (geoms, calculated_info)
     }
 
     pub fn read_xyz_trajectory(filename: &str) -> Vec<(Vec<usize>, Vec<[f64; 3]>)> {

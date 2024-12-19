@@ -6,7 +6,7 @@
  
   import { FileBox, BookOpenText, CircleCheckBig, FolderOpen, Box } from 'lucide-svelte';
  
-  import { GradientButton } from 'flowbite-svelte';
+  import { GradientButton, Drawer, Button, CloseButton, A } from 'flowbite-svelte';
   import { Toast } from 'flowbite-svelte';
   import { Li, List, Card } from 'flowbite-svelte';
 
@@ -39,6 +39,9 @@
     molecular_weight: 0.0,
     connections: [[], [], []],
     draw_info: [[], [], [], []],
+    bond_info:[[], []],
+    vdw_info:[[], []],
+    calculated_info: [[]],
   })
 
   let toastStatus = $state(false);
@@ -72,6 +75,8 @@
       molStatus = true;
       console.log("molStatus: ", molStatus);
 
+      console.log(mol_info)
+
       timeout();
     } catch (error) {
       console.log("Failed to open file");
@@ -94,17 +99,18 @@
     // listenWindowSize();
   })
 
-  let type = $state("state");
+
+
 </script>
 
 <main class="container p-4">
   <GradientButton 
   color="purpleToBlue" 
   type="button" 
-  class="btn-icon btn-lg variant-filled float-right absolute bottom-4 right-4" 
+  class="btn-icon btn-lg variant-filled absolute bottom-8 right-8 z-50" 
   onclick={onOpenFiles}
   >
-    <FileBox />
+    <FileBox /> Open Molecule
   </GradientButton>
   <Toast 
   class="float-left absolute bottom-4 left-4" 
@@ -116,42 +122,24 @@
   Molecule file loaded
   </Toast>
   {#if molStatus}
-  <Card class="p-4">
-    <h5 class="mb-2 text-2xl font-bold tracking-tight text-gray-900 dark:text-white">
-      <BookOpenText class="w-8 h-8 mb-3 text-gray-500 dark:text-gray-400"/>
-      Molecular Information
+  <!-- <GradientButton 
+  color="tealToLime" 
+  type="button" 
+  class="btn-icon btn-lg variant-filled absolute bottom-20 right-4" 
+  onclick={()=>(molInfoHidden=!molInfoHidden)}
+  >
+    <BookOpenText /> {molInfoHidden ? "Show" : "Hide"} Molecule Info
+  </GradientButton> -->
+  <Molview
+  mol_info={mol_info}
+  />
+  {:else}
+  <div class="h-dvh w-screen overflow-y-auto flex items-center justify-center">
+    <h5 class="font-bold text-gray-400 dark:text-white hover:text-gray-500 dark:text-white">
+      <FolderOpen class="size-24" onclick={onOpenFiles}/>
+      Please load a molecule file in .xyz or .out
     </h5>
-    <div class="font-normal text-gray-700 dark:text-gray-400 leading-tight">
-      <List tag="ul" class="space-y-1 text-gray-500 dark:text-gray-400">
-        <Li>
-          <b>Chemcial Formula</b> {mol_info.formula}
-        </Li>
-        <Li>
-          <b>MW</b> {mol_info.molecular_weight}
-        </Li>
-      </List>
-    </div>
-  </Card>
-  <Card class="p-4">
-    <h5 class="mb-2 text-2xl font-bold tracking-tight text-gray-900 dark:text-white">
-      <Box class="w-8 h-8 mb-3 text-gray-500 dark:text-gray-400"/>
-      Molecular Structure
-    </h5>
-    <Molview 
-    type={type}
-    coords={mol_info.coordinates}
-    atoms={mol_info.atoms}
-    color={mol_info.draw_info[0]}
-    radii={mol_info.draw_info[1]}
-    />
-  </Card>
-    {:else}
-    <div class="h-screen flex items-center justify-center">
-      <h5 class="font-bold text-gray-400 dark:text-white hover:text-gray-500 dark:text-white">
-        <FolderOpen class="size-24" onclick={onOpenFiles}/>
-        Please load a molecule file in .xyz or .out
-      </h5>
-    </div>
+  </div>
   {/if}
   
 </main>

@@ -21,8 +21,11 @@ struct MolInfo {
     atoms: Vec<usize>,
     coordinates: Vec<[f64; 3]>,
     molecular_weight: f64,
-    connections: (Vec<Vec<bool>>, Vec<Vec<bool>>, Vec<Vec<[f64;4]>>),
+    connections: (Vec<Vec<bool>>, Vec<Vec<bool>>, Vec<Vec<[f64;7]>>, Vec<Vec<f64>>),
     draw_info: (Vec<String>, Vec<f64>, Vec<f64>, Vec<f64>),
+    bond_info: (Vec<[f64;7]>, Vec<f64>),
+    vdw_info: (Vec<[f64;7]>, Vec<f64>),
+    calculated_info: Vec<(String, f64)>
 }
 
 impl MolInfo {
@@ -32,8 +35,11 @@ impl MolInfo {
         atoms: Vec<usize>,
         coordinates: Vec<[f64; 3]>,
         mol_weight: f64, 
-        connections:(Vec<Vec<bool>>, Vec<Vec<bool>>, Vec<Vec<[f64;4]>>),  // VDW_mat, COV_mat, BOND_mat
-        draw_info: (Vec<String>, Vec<f64>, Vec<f64>, Vec<f64>)  // hex_list, vdw_radii, cov_radii, cpk_radii
+        connections:(Vec<Vec<bool>>, Vec<Vec<bool>>, Vec<Vec<[f64;7]>>, Vec<Vec<f64>>),  // VDW_mat, COV_mat, BOND_mats, distance_mat
+        draw_info: (Vec<String>, Vec<f64>, Vec<f64>, Vec<f64>), // hex_list, vdw_radii, cov_radii, cpk_radii
+        bond_info: (Vec<[f64;7]>, Vec<f64>), // cov_bond_mats, cov_bond_lengths
+        vdw_info: (Vec<[f64;7]>, Vec<f64>), // vdw_bond_mats, vdw_bond_lengths
+        calculated_info: Vec<(String, f64)>
     ) -> Self {
         MolInfo {
             formula: formula.to_string(),
@@ -43,6 +49,9 @@ impl MolInfo {
             molecular_weight: mol_weight,
             connections,
             draw_info,
+            bond_info,
+            vdw_info,
+            calculated_info
         }
     }
 }
@@ -64,17 +73,44 @@ fn jsonize_path(path: &str) -> String {
 // Molecule utils
 
 #[tauri::command]
+fn filter_bonds(bond_coords: Vec<[f64;7]>, bond_lengths: Vec<f64>) -> (Vec<[f64;7]>, Vec<f64>, Vec<[f64;7]>, Vec<f64>) {
+
+    let mut filtered_bonds = Vec::new();
+    let mut filtered_lengths = Vec::new();
+
+    let mut vdw_bonds: Vec<[f64;7]> = Vec::new();
+    let mut vdw_lengths: Vec<f64> = Vec::new();
+
+    for i in 0..bond_coords.len() {
+        if bond_coords[i][3] != 0.0 && bond_coords[i][3] != 0.5 {
+            filtered_bonds.push(bond_coords[i]);
+            filtered_lengths.push(bond_lengths[i]);
+        } else if bond_coords[i][3] == 0.5 {
+            vdw_bonds.push(bond_coords[i]);
+            vdw_lengths.push(bond_lengths[i]);
+        }
+    }
+
+    (filtered_bonds, filtered_lengths, vdw_bonds, vdw_lengths)
+}
+
+#[tauri::command]
 fn load_mol(filename: &str) -> (String, String) {
     tklog::LOG.set_level(LEVEL::Debug);
 
     debug!(format!("Loading molecule from file: {}", filename));
 
     let mut molecule = molecule::Molecule::new(filename.to_string(), Vec::new(), Vec::new());
+    let mut calculated_info:Vec<(String, f64)> = Vec::new();
 
     if filename.ends_with(".xyz") {
         molecule = molecule::mol_from_xyz_file(filename);
     } else if filename.ends_with(".out") {
-        molecule = molecule::mol_from_orca_output(filename);
+        (molecule, calculated_info) = molecule::mol_from_orca_output(filename);
+    } else if filename.ends_with(".log") {
+        (molecule, calculated_info) = molecule::mol_from_gaussian_output(filename);
+    } else {
+        panic!("Unsupported file format");
     }
 
     let formula = molecule.get_formula();
@@ -84,11 +120,28 @@ fn load_mol(filename: &str) -> (String, String) {
     let vdw_matrix = molecule.get_vdw_matrix();
     let cov_matrix = molecule.get_cov_matrix();
     let bonds = molecule.calc_bond_positions();
-    let connections = (vdw_matrix, cov_matrix, bonds);
+    let bonds_clone = bonds.clone();
+    let connections = (vdw_matrix, cov_matrix, bonds, molecule.get_distance_matrix());
 
     let draw_info = molecule.get_draw_info_list();
 
-    let jsonize_mol_info = serde_json::to_string(&MolInfo::new(&formula, no_atoms, molecule.get_atoms(), molecule.get_coordinates(), mol_weight, connections, draw_info)).unwrap_or("Failed to jsonize".to_string());
+    let mut cov_bond_mats_flat:Vec<[f64; 7]> = Vec::new();
+    let mut cov_bond_lengths_flat:Vec<f64> = Vec::new();
+
+    for i in 0..no_atoms {
+        for j in 0..no_atoms {
+            cov_bond_mats_flat.push(bonds_clone[i][j]);
+            cov_bond_lengths_flat.push(molecule.get_distance_matrix()[i][j]);
+        }
+    }
+
+    let (a, b, c, d) = filter_bonds(cov_bond_mats_flat, cov_bond_lengths_flat);
+    let bond_info = (a, b);
+    let vdw_info = (c, d);
+
+    let jsonize_mol_info = 
+        serde_json::to_string(&MolInfo::new(&formula, no_atoms, molecule.get_atoms(), molecule.get_coordinates(), mol_weight, connections, draw_info, bond_info, vdw_info, calculated_info))
+        .unwrap_or("Failed to jsonize".to_string());
 
     (jsonize_molecule(&molecule), jsonize_mol_info)
 }
@@ -115,7 +168,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             load_mol,
             load_mol_from_string,
-            jsonize_path
+            jsonize_path,
+            filter_bonds
         ])
         //.invoke_handler(tauri::generate_handler![jsonize_path])
         .run(tauri::generate_context!())
